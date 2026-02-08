@@ -2,6 +2,8 @@
 
 A configurable statusline script for [Claude Code](https://claude.ai/code) that displays git status, context window usage, session cost, daily stats, and session reset timers in your terminal.
 
+![Claude Code Statusline](screenshot.png)
+
 ## Prerequisites
 
 - **bash** and **jq** (used to parse JSON input from Claude Code)
