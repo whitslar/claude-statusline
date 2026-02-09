@@ -8,7 +8,7 @@ A custom statusline script for Claude Code's `statusLine` setting. It renders a 
 
 ## Files
 
-- **`statusline.sh`** — The main statusline script. Installed by copying to `~/.claude/statusline.sh` and configuring in Claude Code's `settings.json`.
+- **`statusline.sh`** — The main statusline script. Configured in Claude Code's `settings.json` to run from the cloned repo directory.
 - **`statusline-test.sh`** — Visual test matrix that exercises all configuration combinations with sample JSON data.
 
 ## Running

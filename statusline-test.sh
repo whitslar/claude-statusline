@@ -7,7 +7,7 @@ STATUSLINE="$SCRIPT_DIR/statusline.sh"
 
 # Sample JSON input with all fields populated
 SAMPLE_JSON='{
-  "model": {"display_name": "Opus 4.5"},
+  "model": {"id": "claude-opus-4-6", "display_name": "Opus 4.6"},
   "workspace": {"current_dir": "/Users/demo/projects/myapp"},
   "context_window": {
     "used_percentage": 42.5,
@@ -26,7 +26,7 @@ SAMPLE_JSON='{
 
 # Low context JSON (for critical battery display)
 LOW_CONTEXT_JSON='{
-  "model": {"display_name": "Opus 4.5"},
+  "model": {"id": "claude-opus-4-6", "display_name": "Opus 4.6"},
   "workspace": {"current_dir": "/Users/demo/projects/myapp"},
   "context_window": {
     "used_percentage": 92,
@@ -265,6 +265,6 @@ echo "  To use in settings.json:"
 echo ""
 echo '  "statusLine": {'
 echo '    "type": "command",'
-echo '    "command": "CLAUDE_STATUSLINE_DAILY=\"messages,sessions\" ~/.claude/statusline.sh"'
+echo '    "command": "CLAUDE_STATUSLINE_DAILY=\"messages,sessions\" ~/claude-statusline/statusline.sh"'
 echo '  }'
 echo ""

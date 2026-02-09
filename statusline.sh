@@ -36,8 +36,11 @@ exec 0</dev/null
 # CLAUDE_STATUSLINE_SESSION_CACHE_TTL: session stats cache TTL in seconds (default: 30)
 # CLAUDE_STATUSLINE_VERBOSE: 1=show label text (e.g. "left", "until compact", "until reset"), 0=hide
 #   Default: 1 (enabled)
-# CLAUDE_STATUSLINE_AUTOCOMPACT_BUFFER: tokens reserved for autocompact (default: 45000)
-#   Set to 0 to disable buffer adjustment in context calculations
+# CLAUDE_STATUSLINE_AUTOCOMPACT_BUFFER: override auto-detected autocompact buffer (tokens)
+#   Default: auto (per-model detection from /context output in ~/.claude/projects/*.jsonl)
+#   Detected values are stored per model ID in ~/.claude/autobuffer-sizes.json
+#   If not detected for the current model, the statusline shows an error prompting
+#   the user to run /context once. Set to 0 to disable buffer adjustment entirely
 # CLAUDE_STATUSLINE_DEBUG_TIME: override current time (unix timestamp) for testing
 
 SHOW_DEBUG_INFO=${CLAUDE_STATUSLINE_DEBUG:-0}
@@ -57,7 +60,7 @@ DAILY_CACHE_TTL=${CLAUDE_STATUSLINE_DAILY_CACHE_TTL:-60}
 SESSION_CACHE_TTL=${CLAUDE_STATUSLINE_SESSION_CACHE_TTL:-30}
 STATS_CACHE_FILE="${HOME}/.claude/stats-cache.json"
 PROJECTS_DIR="${HOME}/.claude/projects"
-AUTOCOMPACT_BUFFER=${CLAUDE_STATUSLINE_AUTOCOMPACT_BUFFER:-45000}
+AUTOCOMPACT_BUFFER=${CLAUDE_STATUSLINE_AUTOCOMPACT_BUFFER:-auto}
 
 # Session duration in seconds (5 hours, matching Ruby script)
 SESSION_DURATION_SECS=$((5 * 3600))
@@ -195,6 +198,7 @@ get_current_time() {
 }
 
 get_debug_info() { if [[ "$SHOW_DEBUG_INFO" == "1" ]]; then echo "$input"; fi; }
+get_model_id() { echo "$input" | jq -r '.model.id // empty'; }
 get_model_name() { echo "$input" | jq -r '.model.display_name // "Unknown"'; }
 get_current_dir() { echo "$input" | jq -r '.workspace.current_dir // empty'; }
 get_project_dir() { echo "$input" | jq -r '.workspace.project_dir // empty'; }
@@ -259,6 +263,116 @@ is_cache_valid() {
   file_age=$((now - cache_time))
   [[ $file_age -lt $GIT_CACHE_TTL ]]
 }
+
+# =============================================================================
+# Autocompact Buffer Auto-Detection (per-model, stored in ~/.claude/autobuffer-sizes.json)
+# =============================================================================
+AUTOBUFFER_FILE="${HOME}/.claude/autobuffer-sizes.json"
+AUTOBUFFER_SCAN_MARKER="$CACHE_DIR/autocompact-last-scan"
+
+# Scan all jsonl files for /context output, extract model ID + autocompact buffer pairs,
+# and merge into ~/.claude/autobuffer-sizes.json
+scan_and_update_autobuffers() {
+  if [[ ! -d "$PROJECTS_DIR" ]]; then
+    return
+  fi
+
+  # Extract "model_id buffer_k" pairs from /context output in all jsonl files
+  # Each /context message contains both "claude-model-id · Nk/Nk tokens" and "Autocompact buffer: Nk"
+  # awk deduplicates keeping the last value per model and converts Nk → N*1000
+  local deduped
+  deduped=$(grep -rh "Autocompact buffer:" "$PROJECTS_DIR" 2>/dev/null | \
+    while IFS= read -r line; do
+      local m b
+      m=$(echo "$line" | grep -oE 'claude-[a-z]+-[0-9]+-[0-9]+(-[0-9]+)?' | head -1)
+      b=$(echo "$line" | grep -oE 'Autocompact buffer: [0-9]+\.?[0-9]*k' | tail -1 | grep -oE '[0-9]+\.?[0-9]*')
+      [[ -n "$m" && -n "$b" ]] && echo "$m $b"
+    done | awk '{seen[$1]=$2} END {for (k in seen) printf "%s %d\n", k, seen[k]*1000}')
+
+  if [[ -z "$deduped" ]]; then
+    return
+  fi
+
+  # Build JSON from deduped pairs in a single jq call
+  local new_json
+  new_json=$(echo "$deduped" | jq -Rn '[inputs | split(" ") | {(.[0]): (.[1] | tonumber)}] | add // {}')
+
+  # Merge with existing file (new values override old)
+  if [[ -f "$AUTOBUFFER_FILE" ]]; then
+    local existing
+    existing=$(jq '.' "$AUTOBUFFER_FILE" 2>/dev/null || echo "{}")
+    jq -n --argjson existing "$existing" --argjson new "$new_json" '$existing + $new' > "$AUTOBUFFER_FILE"
+  else
+    echo "$new_json" > "$AUTOBUFFER_FILE"
+  fi
+}
+
+detect_autocompact_buffer() {
+  local model_id="$1"
+
+  # Check persistent cache for current model
+  if [[ -n "$model_id" && -f "$AUTOBUFFER_FILE" ]]; then
+    local cached
+    cached=$(jq -r --arg model "$model_id" '.[$model] // empty' "$AUTOBUFFER_FILE" 2>/dev/null)
+    if [[ -n "$cached" ]]; then
+      echo "$cached"
+      return
+    fi
+  fi
+
+  # Scan jsonl files and update autobuffer-sizes.json
+  # Rate-limit to once per hour, BUT always scan if the current model is missing
+  local should_scan=1
+  if [[ -f "$AUTOBUFFER_SCAN_MARKER" ]]; then
+    local cache_time now file_age
+    cache_time=$(stat -f %m "$AUTOBUFFER_SCAN_MARKER" 2>/dev/null || stat -c %Y "$AUTOBUFFER_SCAN_MARKER" 2>/dev/null)
+    now=$(get_current_time)
+    file_age=$((now - cache_time))
+    [[ $file_age -lt 3600 ]] && should_scan=0
+  fi
+
+  if [[ $should_scan -eq 1 ]]; then
+    scan_and_update_autobuffers
+    touch "$AUTOBUFFER_SCAN_MARKER"
+  fi
+
+  # Try again from updated cache
+  if [[ -n "$model_id" && -f "$AUTOBUFFER_FILE" ]]; then
+    local result
+    result=$(jq -r --arg model "$model_id" '.[$model] // empty' "$AUTOBUFFER_FILE" 2>/dev/null)
+    if [[ -n "$result" ]]; then
+      echo "$result"
+      return
+    fi
+  fi
+
+  # Model still not found — force one more scan if we skipped earlier
+  if [[ $should_scan -eq 0 ]]; then
+    scan_and_update_autobuffers
+    touch "$AUTOBUFFER_SCAN_MARKER"
+    if [[ -n "$model_id" && -f "$AUTOBUFFER_FILE" ]]; then
+      local retry
+      retry=$(jq -r --arg model "$model_id" '.[$model] // empty' "$AUTOBUFFER_FILE" 2>/dev/null)
+      if [[ -n "$retry" ]]; then
+        echo "$retry"
+        return
+      fi
+    fi
+  fi
+
+  echo ""  # Not found
+}
+
+# Resolve autocompact buffer: explicit env var wins, otherwise auto-detect per model
+MODEL_ID=$(get_model_id)
+AUTOCOMPACT_NOT_FOUND=0
+if [[ "$AUTOCOMPACT_BUFFER" == "auto" ]]; then
+  AUTOCOMPACT_BUFFER=$(detect_autocompact_buffer "$MODEL_ID")
+  if [[ -z "$AUTOCOMPACT_BUFFER" ]]; then
+    AUTOCOMPACT_NOT_FOUND=1
+    AUTOCOMPACT_BUFFER=0
+  fi
+fi
 
 # =============================================================================
 # Git Information Functions
@@ -1004,6 +1118,12 @@ time_calc() {
 
 DEBUG_INFO=$(get_debug_info)
 
+# If autocompact buffer not found and not explicitly disabled, show error and exit
+if [[ "$AUTOCOMPACT_NOT_FOUND" == "1" ]]; then
+  printf "Autocompact buffer size not found. Run /context once in Claude Code to auto-detect it, or set CLAUDE_STATUSLINE_AUTOCOMPACT_BUFFER.\\n"
+  exit 0
+fi
+
 # Always run calculations directly (time_calc with eval has issues on macOS)
 MODEL=$(get_model_name)
 CURRENT_DIR=$(get_curr_dir)
@@ -1090,6 +1210,7 @@ if [[ -n "$DEBUG_INFO" ]]; then
       output+=$'\n'"${reset}Session: ${session_debug}${reset}"
     fi
   fi
+  output+=$'\n'"${reset}Model ID: ${MODEL_ID:-unknown} | Autocompact buffer: ${AUTOCOMPACT_BUFFER} tokens${reset}"
   output+=$'\n'"${reset}Input: ${DEBUG_INFO}${reset}"
 fi
 
@@ -1099,10 +1220,10 @@ printf "%s\\n" "$output"
 # Test Commands
 # =============================================================================
 # Basic test:
-# echo '{"model":{"display_name":"Opus 4.5"},"workspace":{"current_dir":"/Users/demo/projects/myapp"},"context_window":{"used_percentage":42.5,"remaining_percentage":57.5,"total_input_tokens":85000,"total_output_tokens":12000,"context_window_size":200000},"cost":{"total_cost_usd":0.42,"total_duration_ms":135000,"total_lines_added":156,"total_lines_removed":23}}' | ./statusline.sh
+# echo '{"model":{"id":"claude-opus-4-6","display_name":"Opus 4.6"},"workspace":{"current_dir":"/Users/demo/projects/myapp"},"context_window":{"used_percentage":42.5,"remaining_percentage":57.5,"total_input_tokens":85000,"total_output_tokens":12000,"context_window_size":200000},"cost":{"total_cost_usd":0.42,"total_duration_ms":135000,"total_lines_added":156,"total_lines_removed":23}}' | ./statusline.sh
 
 # Test with low context:
-# echo '{"model":{"display_name":"Opus 4.5"},"workspace":{"current_dir":"/Users/demo/projects/myapp"},"context_window":{"used_percentage":92,"remaining_percentage":8,"total_input_tokens":180000,"total_output_tokens":4000,"context_window_size":200000}}' | ./statusline.sh
+# echo '{"model":{"id":"claude-opus-4-6","display_name":"Opus 4.6"},"workspace":{"current_dir":"/Users/demo/projects/myapp"},"context_window":{"used_percentage":92,"remaining_percentage":8,"total_input_tokens":180000,"total_output_tokens":4000,"context_window_size":200000}}' | ./statusline.sh
 
 # Test with custom git options:
 # CLAUDE_STATUSLINE_GIT="branch,ahead_behind,staged,modified,dirty" ./statusline.sh < test.json
