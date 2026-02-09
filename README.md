@@ -4,6 +4,8 @@ A configurable statusline script for [Claude Code](https://claude.ai/code) that 
 
 ![Claude Code Statusline](screenshot.png)
 
+![Claude Code Statusline in action](screenshot-2.png)
+
 ## Prerequisites
 
 - **bash** and **jq** (used to parse JSON input from Claude Code)
